@@ -154,6 +154,8 @@ class course_user_state_store implements course_state_store,
      * @param int $amount The amount.
      */
     public function increase($id, $amount) {
+        global $DB; 
+
         $prexp = 0;
         $postxp = $amount;
 
@@ -174,9 +176,83 @@ class course_user_state_store implements course_state_store,
         } else {
             $this->insert($id, $amount);
         }
+        
+            // === SOLUSI 1: Perbaikan Sinkronisasi Level ===
+        try {
+            $managerfactory = \block_xp\di::get('manager_factory');
+            $manager = $managerfactory->get_course_manager($this->courseid);
+            
+            // Refresh state setelah XP diupdate
+            $store = $manager->get_store();
+            $state = $store->get_state($id);
+            $level = $state->get_level()->get_level();
 
-        $this->observe_increase($id, $prexp, $postxp);
+            // Update level di tabel mdl_block_xp
+            $existing = $DB->get_record('block_xp', [
+                'userid' => $id,
+                'courseid' => $this->courseid
+            ]);
+
+                if ($existing) {
+                    $DB->set_field('block_xp', 'lvl', $level, [
+                        'userid' => $id,
+                        'courseid' => $this->courseid
+                    ]);
+                } else {
+                    // Insert jika belum ada record
+                    $DB->insert_record('block_xp', [
+                        'userid' => $id,
+                        'courseid' => $this->courseid,
+                        'xp' => $postxp,
+                        'lvl' => $level
+                    ]);
+                }
+            
+            error_log("XP Level Updated: User $id, Course {$this->courseid}, XP: $postxp, Level: $level");
+            
+            } catch (Exception $e) {
+                error_log("Error updating XP level: " . $e->getMessage());
+            }
     }
+
+        // === SOLUSI 4: Force Update dengan Direct SQL ===
+    public function force_update_level($userid) {
+        global $DB;
+        
+        try {
+            // Ambil XP terkini
+            $record = $DB->get_record($this->table, [
+                'userid' => $userid,
+                'courseid' => $this->courseid
+            ]);
+            
+            if ($record) {
+                $managerfactory = \block_xp\di::get('manager_factory');
+                $manager = $managerfactory->get_course_manager($this->courseid);
+                $state = $manager->get_store()->get_state($userid);
+                $level = $state->get_level()->get_level();
+                
+                // Update langsung dengan SQL
+                $sql = "UPDATE {block_xp} 
+                        SET lvl = :lvl 
+                        WHERE userid = :userid AND courseid = :courseid";
+                
+                $DB->execute($sql, [
+                    'lvl' => $level,
+                    'userid' => $userid,
+                    'courseid' => $this->courseid
+                ]);
+                
+                return true;
+            }
+            
+        } catch (Exception $e) {
+            error_log("Force update error: " . $e->getMessage());
+            return false;
+        }
+        
+            return false;
+        }
 
     /**
      * Add a certain amount of experience points.

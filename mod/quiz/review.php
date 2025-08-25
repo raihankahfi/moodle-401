@@ -30,6 +30,7 @@ require_once(__DIR__ . '/../../config.php');
 require_once($CFG->dirroot . '/mod/quiz/locallib.php');
 require_once($CFG->dirroot . '/mod/quiz/report/reportlib.php');
 
+
 $attemptid = required_param('attempt', PARAM_INT);
 $page      = optional_param('page', 0, PARAM_INT);
 $showall   = optional_param('showall', null, PARAM_BOOL);
@@ -57,6 +58,7 @@ $PAGE->set_url($attemptobj->review_url(null, $page, $showall));
 // Check login.
 require_login($attemptobj->get_course(), false, $attemptobj->get_cm());
 $attemptobj->check_review_capability();
+
 
 // Create an object to manage all the other (non-roles) access rules.
 $accessmanager = $attemptobj->get_access_manager(time());
@@ -262,6 +264,63 @@ $regions = $PAGE->blocks->get_regions();
 $PAGE->blocks->add_fake_block($navbc, reset($regions));
 
 echo $output->review_page($attemptobj, $slots, $page, $showall, $lastpage, $options, $summarydata);
+
+// ===== TAMPILKAN NOTIFICATION SEDERHANA =====
+if (isset($SESSION->quiz_notification)) {
+    $message = $SESSION->quiz_notification;
+    $type = $SESSION->quiz_notification_type ?? 'info';
+    
+    // Tentukan warna berdasarkan type
+    if ($type == 'success') {
+        $bg_color = '#d1ecf1';
+        $border_color = '#bee5eb';
+        $text_color = '#0c5460';
+    } else {
+        $bg_color = '#d4edda';
+        $border_color = '#c3e6cb';
+        $text_color = '#155724';
+    }
+    
+    echo '<script>
+    document.addEventListener("DOMContentLoaded", function() {
+        // Buat notification element
+        var notification = document.createElement("div");
+        notification.style.cssText = `
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: ' . $bg_color . ';
+            border: 1px solid ' . $border_color . ';
+            color: ' . $text_color . ';
+            padding: 15px 20px;
+            border-radius: 5px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            z-index: 9999;
+            font-size: 14px;
+            max-width: 500px;
+            text-align: center;
+        `;
+        notification.innerHTML = "' . addslashes($message) . '";
+        
+        // Tambahkan ke body
+        document.body.appendChild(notification);
+        
+        // Auto hide setelah 5 detik
+        setTimeout(function() {
+            notification.style.opacity = "0";
+            notification.style.transition = "opacity 1.0s";
+            setTimeout(function() {
+                document.body.removeChild(notification);
+            }, 500);
+        }, 5000);
+    });
+    </script>';
+    
+    // Hapus dari session
+    unset($SESSION->quiz_notification);
+    unset($SESSION->quiz_notification_type);
+}
 
 // Trigger an event for this review.
 $attemptobj->fire_attempt_reviewed_event();

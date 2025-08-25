@@ -51,6 +51,8 @@ $string['basepointslineardesc'] = 'The minimum increment between each level.';
 $string['basepointsrelativedesc'] = 'The number of points to start with.';
 $string['blockappearance'] = 'Block appearance';
 $string['blockappearancemovedtopluginsettings'] = 'The block appearance settings were moved to the plugin\'s settings page.';
+$string['bonus_applied'] = 'Congrats! You earned an XP bonus of {$a} points on your quiz!';
+
 $string['cachedef_filters'] = 'Level filters';
 $string['cachedef_ruleevent_eventslist'] = 'List of some events';
 $string['cannotbesetindefaults'] = 'This cannot be set in the default values.';

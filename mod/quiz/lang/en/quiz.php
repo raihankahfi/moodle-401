@@ -1062,6 +1062,9 @@ $string['questionversionlatest'] = 'v{$a} (latest)';
 $string['alwayslatest'] = 'Always latest';
 $string['gobacktoquiz'] = 'Go back';
 
+$string['xp_bonus_applied'] = 'XP Level Bonus Applied: {$a->percentage}% (Level {$a->level})';
+$string['xp_integration_enabled'] = 'XP Integration is enabled for this quiz';
+
 // Deprecated since Moodle 3.11.
 $string['completionattemptsexhausteddesc'] = 'Complete if all available attempts are exhausted';
 

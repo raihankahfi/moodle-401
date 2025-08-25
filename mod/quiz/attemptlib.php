@@ -25,10 +25,12 @@
  * @license   http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
+
 defined('MOODLE_INTERNAL') || die();
 
 use core_question\local\bank\question_version_status;
 use mod_quiz\question\bank\qbank_helper;
+use block_xp\di;
 
 
 /**
@@ -2172,6 +2174,63 @@ class quiz_attempt {
         $transaction->allow_commit();
     }
 
+    // Cari di XP block plugin
+        
+
+    /**
+     * Fungsi sederhana untuk update level user berdasarkan XP
+     */
+
+    public function update_user_xp_level($userid, $courseid) {
+        global $DB;
+        
+        // Ambil data XP user
+        $user_xp = $DB->get_record('block_xp', [
+            'userid' => $userid, 
+            'courseid' => $courseid
+        ]);
+        
+        if (!$user_xp) {
+            return false;
+        }
+        
+        // Ambil setting level dari config
+        $config = $DB->get_record('block_xp_config', [
+            'courseid' => $courseid
+        ]);
+        
+        if (!$config) {
+            return $user_xp->lvl;
+        }
+        
+        $levels = json_decode($config->levelsdata);
+        
+        // Hitung level baru berdasarkan XP
+        $new_level = 0;
+        foreach ($levels->xp as $required_xp) {
+            if ($user_xp->xp >= $required_xp) {
+                $new_level++;
+            } else {
+                break;
+            }
+        }
+        
+        // Update level jika berubah
+        if ($new_level != $user_xp->lvl) {
+            $user_xp->lvl = $new_level;
+            $DB->update_record('block_xp', $user_xp);
+        }
+        
+        return $new_level;
+    }
+
+    public function get_user_xp_level($userid, $courseid) {
+        return $this->update_user_xp_level($userid, $courseid);
+    }
+
+
+    
+
     /**
      * Submit the attempt.
      *
@@ -2187,44 +2246,174 @@ class quiz_attempt {
      * @param bool $studentisonline is the student currently interacting with Moodle?
      */
     public function process_finish($timestamp, $processsubmitted, $timefinish = null, $studentisonline = false) {
-        global $DB;
+    global $DB, $SESSION, $PAGE;
 
-        $transaction = $DB->start_delegated_transaction();
+    $transaction = $DB->start_delegated_transaction();
 
-        if ($processsubmitted) {
-            $this->quba->process_all_actions($timestamp);
-        }
-        $this->quba->finish_all_questions($timestamp);
-
-        question_engine::save_questions_usage_by_activity($this->quba);
-
-        $this->attempt->timemodified = $timestamp;
-        $this->attempt->timefinish = $timefinish ?? $timestamp;
-        $this->attempt->sumgrades = $this->quba->get_total_mark();
-        $this->attempt->state = self::FINISHED;
-        $this->attempt->timecheckstate = null;
-        $this->attempt->gradednotificationsenttime = null;
-
-        if (!$this->requires_manual_grading() ||
-                !has_capability('mod/quiz:emailnotifyattemptgraded', $this->get_quizobj()->get_context(),
-                        $this->get_userid())) {
-            $this->attempt->gradednotificationsenttime = $this->attempt->timefinish;
-        }
-
-        $DB->update_record('quiz_attempts', $this->attempt);
-
-        if (!$this->is_preview()) {
-            quiz_save_best_grade($this->get_quiz(), $this->attempt->userid);
-
-            // Trigger event.
-            $this->fire_state_transition_event('\mod_quiz\event\attempt_submitted', $timestamp, $studentisonline);
-
-            // Tell any access rules that care that the attempt is over.
-            $this->get_access_manager($timestamp)->current_attempt_finished();
-        }
-
-        $transaction->allow_commit();
+    if ($processsubmitted) {
+        $this->quba->process_all_actions($timestamp);
     }
+
+    $this->quba->finish_all_questions($timestamp);
+    question_engine::save_questions_usage_by_activity($this->quba);
+
+    $this->attempt->timemodified = $timestamp;
+    $this->attempt->timefinish   = $timefinish ?? $timestamp;
+    $original_grade              = $this->quba->get_total_mark();
+
+    // === XP Bonus untuk Level 3 ===
+    $userid        = $this->get_userid();
+    $coursecontext = $this->get_quizobj()->get_context()->get_course_context();
+    $courseid      = $coursecontext->instanceid;
+
+    $final_grade   = $original_grade;
+    $bonus_applied = false;
+    $bonus_amount  = 0;
+
+
+    // Check XP block
+    if ($this->is_xp_block_available()) {
+
+       // $this->update_user_xp_level($userid, $courseid);
+
+        $user_level = $this->get_user_xp_level($userid, $courseid);
+
+        if ($user_level && $user_level >= 3) {
+            $max_grade   = $this->get_quiz()->sumgrades;
+            $bonus_grade = $original_grade * 1.10; // +10%
+
+            if ($bonus_grade > $max_grade) {
+                $bonus_grade = $max_grade;
+            }
+
+            $final_grade   = $bonus_grade;
+            $bonus_applied = true;
+            $bonus_amount  = $final_grade - $original_grade;
+        }
+    }
+
+    // Simpan nilai attempt
+    $this->attempt->sumgrades = $final_grade;
+    $this->attempt->state     = self::FINISHED;
+    $this->attempt->timecheckstate = null;
+
+    $DB->update_record('quiz_attempts', $this->attempt);
+
+    // === Update gradebook ===
+    if (!$this->is_preview()) {
+        quiz_save_best_grade($this->get_quiz(), $this->attempt->userid);
+        $this->fire_state_transition_event('\mod_quiz\event\attempt_submitted', $timestamp, $studentisonline);
+        $this->get_access_manager($timestamp)->current_attempt_finished();
+    }
+
+    $transaction->allow_commit();
+
+    // === SIMPAN NOTIFICATION MESSAGE KE SESSION ===
+    if (!$this->is_preview()) {
+        $quiz = $this->get_quiz();
+        $final_percentage = ($final_grade / $quiz->sumgrades) * 100;
+        
+        if ($final_percentage >= 100) {
+            // Jika nilai 100%, tampilkan pesan sukses
+            $SESSION->quiz_notification = "🏆 Nilai Anda sudah mencapai 100%! Bonus tidak diperlukan.";
+            $SESSION->quiz_notification_type = "success";
+            
+        } else if ($bonus_applied) {
+            // Jika mendapat bonus tapi belum 100%
+            $bonus_text = number_format($bonus_amount, 2);
+            $SESSION->quiz_notification = "🎉 Selamat! Anda mendapat bonus Level {$user_level}: +{$bonus_text} poin";
+            $SESSION->quiz_notification_type = "info";
+        }
+    }
+
+}
+
+
+/**
+ * Check if XP block is installed and available
+ * @return bool
+ */
+private function is_xp_block_available() {
+    global $CFG, $DB;
+    
+    // Method 2: Check if block is enabled in database
+    try {
+        $plugin_enabled = $DB->record_exists('config_plugins', [
+            'plugin' => 'block_xp'
+        ]);
+        
+        if (!$plugin_enabled) {
+            debugging("XP block not enabled in database", DEBUG_NORMAL);
+            return false;
+        }
+        
+        // Method 3: Check if XP tables exist
+        $tables_exist = $DB->get_manager()->table_exists('block_xp');
+        if (!$tables_exist) {
+            debugging("XP block tables do not exist", DEBUG_NORMAL);
+            return false;
+        }
+        
+        return true;
+        
+    } catch (Exception $e) {
+        debugging("Error checking XP block availability: " . $e->getMessage(), DEBUG_NORMAL);
+        return false;
+    }
+}
+
+/**
+ * Set XP bonus notification for next page display
+ * @param float $final_grade
+ * @param float $original_grade
+ */
+private function set_xp_bonus_notification($final_grade, $original_grade) {
+    global $SESSION;
+    
+    // Using Moodle's session notification system
+    if (!isset($SESSION->block_xp_notifications)) {
+        $SESSION->block_xp_notifications = array();
+    }
+    
+    $message = get_string('xpbonusapplied', 'block_xp', [
+        'bonus' => round($final_grade, 2), 
+        'original' => round($original_grade, 2)
+    ]);
+    
+    // Fallback if string doesn't exist
+    if (strpos($message, 'xpbonusapplied') !== false) {
+        $message = "🎉 Congratulations! You received a 10% XP bonus for reaching Level 3! " .
+                  "Original: " . round($original_grade, 2) . 
+                  ", Final: " . round($final_grade, 2);
+    }
+    
+    $SESSION->block_xp_notifications[] = [
+        'message' => $message,
+        'type' => 'success',
+        'timestamp' => time()
+    ];
+    
+}
+
+/**
+ * Display stored XP notifications (call this in template or view)
+ * Add this method and call it in your quiz result page
+ */
+public static function display_xp_notifications() {
+    global $SESSION, $OUTPUT;
+    
+    if (isset($SESSION->block_xp_notifications) && !empty($SESSION->block_xp_notifications)) {
+        foreach ($SESSION->block_xp_notifications as $notification) {
+            // Only show recent notifications (within last 5 minutes)
+            if ((time() - $notification['timestamp']) < 300) {
+                echo $OUTPUT->notification($notification['message'], $notification['type']);
+            }
+        }
+        
+        // Clear displayed notifications
+        unset($SESSION->block_xp_notifications);
+    }
+}
 
     /**
      * Update this attempt timecheckstate if necessary.
