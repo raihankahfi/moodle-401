@@ -2270,12 +2270,13 @@ class quiz_attempt {
     $bonus_applied = false;
     $bonus_amount  = 0;
 
-
     // Check XP block
     if ($this->is_xp_block_available()) {
 
-       // $this->update_user_xp_level($userid, $courseid);
+        // Sinkron level Moodle internal sebelum cek bonus
+        \local_sync_xp\observer::sync_xp_level_manual($userid, $courseid);
 
+        // Ambil level user terbaru
         $user_level = $this->get_user_xp_level($userid, $courseid);
 
         if ($user_level && $user_level >= 3) {
@@ -2292,16 +2293,26 @@ class quiz_attempt {
         }
     }
 
-    // Simpan nilai attempt
-    $this->attempt->sumgrades = $final_grade;
+    // === Update attempt dengan bonus sebelum quiz_save_best_grade() ===
+    $this->attempt->sumgrades = $final_grade; //
     $this->attempt->state     = self::FINISHED;
     $this->attempt->timecheckstate = null;
+    $DB->update_record('quiz_attempts', $this->attempt); 
 
-    $DB->update_record('quiz_attempts', $this->attempt);
-
-    // === Update gradebook ===
     if (!$this->is_preview()) {
-        quiz_save_best_grade($this->get_quiz(), $this->attempt->userid);
+        quiz_save_best_grade($this->get_quiz(), $userid); 
+  
+
+        $grade_item = grade_item::fetch(array(
+            'courseid'      => $courseid,
+            'itemtype'      => 'mod',
+            'itemmodule'    => 'quiz',
+            'iteminstance'  => $this->get_quiz()->id
+        ));
+        if ($grade_item) {
+            $grade_item->update_final_grade($userid, $final_grade); 
+        }
+
         $this->fire_state_transition_event('\mod_quiz\event\attempt_submitted', $timestamp, $studentisonline);
         $this->get_access_manager($timestamp)->current_attempt_finished();
     }
