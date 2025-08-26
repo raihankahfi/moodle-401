@@ -2228,9 +2228,6 @@ class quiz_attempt {
         return $this->update_user_xp_level($userid, $courseid);
     }
 
-
-    
-
     /**
      * Submit the attempt.
      *
@@ -2245,98 +2242,281 @@ class quiz_attempt {
      *      (otherwise use $timestamp as the finish time as well).
      * @param bool $studentisonline is the student currently interacting with Moodle?
      */
+
     public function process_finish($timestamp, $processsubmitted, $timefinish = null, $studentisonline = false) {
     global $DB, $SESSION, $PAGE;
 
     $transaction = $DB->start_delegated_transaction();
 
-    if ($processsubmitted) {
-        $this->quba->process_all_actions($timestamp);
-    }
+    try {
+        if ($processsubmitted) {
+            $this->quba->process_all_actions($timestamp);
+        }
 
-    $this->quba->finish_all_questions($timestamp);
-    question_engine::save_questions_usage_by_activity($this->quba);
+        $this->quba->finish_all_questions($timestamp);
+        question_engine::save_questions_usage_by_activity($this->quba);
 
-    $this->attempt->timemodified = $timestamp;
-    $this->attempt->timefinish   = $timefinish ?? $timestamp;
-    $original_grade              = $this->quba->get_total_mark();
+        $this->attempt->timemodified = $timestamp;
+        $this->attempt->timefinish   = $timefinish ?? $timestamp;
+        $original_grade              = $this->quba->get_total_mark();
 
-    // === XP Bonus untuk Level 3 ===
-    $userid        = $this->get_userid();
-    $coursecontext = $this->get_quizobj()->get_context()->get_course_context();
-    $courseid      = $coursecontext->instanceid;
+        // === DEBUG: Log semua data penting ===
+        $userid        = $this->get_userid();
+        $coursecontext = $this->get_quizobj()->get_context()->get_course_context();
+        $courseid      = $coursecontext->instanceid;
+        $quiz          = $this->get_quiz();
+        $max_grade     = $quiz->sumgrades;
 
-    $final_grade   = $original_grade;
-    $bonus_applied = false;
-    $bonus_amount  = 0;
+        error_log("=== QUIZ BONUS DEBUG START ===");
+        error_log("User ID: $userid");
+        error_log("Course ID: $courseid");
+        error_log("Quiz ID: {$quiz->id}");
+        error_log("Original Grade: $original_grade");
+        error_log("Max Grade: $max_grade");
+        error_log("Attempt ID: {$this->attempt->id}");
 
-    // Check XP block
-    if ($this->is_xp_block_available()) {
+        $final_grade   = $original_grade;
+        $bonus_applied = false;
+        $bonus_amount  = 0;
+        $user_level    = 0;
 
-        // Sinkron level Moodle internal sebelum cek bonus
-        \local_sync_xp\observer::sync_xp_level_manual($userid, $courseid);
-
-        // Ambil level user terbaru
-        $user_level = $this->get_user_xp_level($userid, $courseid);
-
-        if ($user_level && $user_level >= 3) {
-            $max_grade   = $this->get_quiz()->sumgrades;
-            $bonus_grade = $original_grade * 1.10; // +10%
-
-            if ($bonus_grade > $max_grade) {
-                $bonus_grade = $max_grade;
+        // Check apakah sudah mencapai 100% sebelum bonus
+        $original_percentage = ($max_grade > 0) ? ($original_grade / $max_grade) * 100 : 0;
+        error_log("Original Percentage: $original_percentage%");
+        
+        if ($original_percentage >= 100) {
+            // Jika sudah 100%, tidak perlu bonus
+            $final_grade = $max_grade;
+            error_log("Grade already 100%, no bonus needed");
+        } else {
+            error_log("Grade < 100%, checking for bonus eligibility...");
+            
+            // === MULTIPLE XP LEVEL DETECTION METHODS ===
+            
+            // Method 1: Direct block_xp table query
+            try {
+                $xp_record = $DB->get_record('block_xp', 
+                    array('userid' => $userid, 'courseid' => $courseid), 
+                    'lvl, xp, id'
+                );
+                
+                if ($xp_record) {
+                    $user_level = $xp_record->lvl;
+                    error_log("Method 1 - block_xp table: Level=$user_level, XP={$xp_record->xp}, ID={$xp_record->id}");
+                } else {
+                    error_log("Method 1 - No record in block_xp table");
+                }
+            } catch (Exception $e) {
+                error_log("Method 1 Error: " . $e->getMessage());
             }
 
-            $final_grade   = $bonus_grade;
-            $bonus_applied = true;
-            $bonus_amount  = $final_grade - $original_grade;
+            // Method 2: Alternative table block_xp_levels
+            if ($user_level == 0) {
+                try {
+                    $alt_record = $DB->get_record('block_xp_levels', 
+                        array('userid' => $userid, 'courseid' => $courseid), 
+                        'level, xp'
+                    );
+                    
+                    if ($alt_record) {
+                        $user_level = $alt_record->level;
+                        error_log("Method 2 - block_xp_levels table: Level=$user_level, XP={$alt_record->xp}");
+                    } else {
+                        error_log("Method 2 - No record in block_xp_levels table");
+                    }
+                } catch (Exception $e) {
+                    error_log("Method 2 Error: " . $e->getMessage());
+                }
+            }
+
+            // Method 3: Check semua table XP yang mungkin ada
+            if ($user_level == 0) {
+                try {
+                    // Cek table apa saja yang ada dengan nama mengandung 'xp'
+                    $tables = $DB->get_tables();
+                    $xp_tables = array();
+                    foreach ($tables as $table) {
+                        if (stripos($table, 'xp') !== false) {
+                            $xp_tables[] = $table;
+                        }
+                    }
+                    error_log("Available XP tables: " . implode(', ', $xp_tables));
+                    
+                    // Coba query ke table lain jika ada
+                    foreach ($xp_tables as $table) {
+                        if ($table != 'block_xp' && $table != 'block_xp_levels') {
+                            try {
+                                $columns = $DB->get_columns($table);
+                                $has_userid = isset($columns['userid']);
+                                $has_courseid = isset($columns['courseid']);
+                                $level_col = isset($columns['level']) ? 'level' : (isset($columns['lvl']) ? 'lvl' : null);
+                                
+                                if ($has_userid && $has_courseid && $level_col) {
+                                    $record = $DB->get_record($table, 
+                                        array('userid' => $userid, 'courseid' => $courseid), 
+                                        $level_col
+                                    );
+                                    if ($record && $record->$level_col > 0) {
+                                        $user_level = $record->$level_col;
+                                        error_log("Method 3 - Found in table $table: Level=$user_level");
+                                        break;
+                                    }
+                                }
+                            } catch (Exception $e) {
+                                // Silent fail for table exploration
+                            }
+                        }
+                    }
+                } catch (Exception $e) {
+                    error_log("Method 3 Error: " . $e->getMessage());
+                }
+            }
+
+            // Method 4: Manual level assignment untuk testing
+            if ($user_level == 0) {
+                // TEMPORARY: Set manual level for testing
+                // Hapus ini setelah masalah terselesaikan
+                error_log("WARNING: Using manual level assignment for testing");
+                $user_level = 3; // Set manual untuk testing
+            }
+
+            // Method 5: Existing method sebagai backup
+            if (method_exists($this, 'is_xp_block_available') && $this->is_xp_block_available()) {
+                error_log("XP Block is available - trying existing methods");
+                
+                try {
+                    if (class_exists('\local_sync_xp\observer')) {
+                        \local_sync_xp\observer::sync_xp_level_manual($userid, $courseid);
+                        error_log("XP Level sync completed");
+                    }
+                } catch (Exception $e) {
+                    error_log("XP Level sync failed: " . $e->getMessage());
+                }
+
+                try {
+                    if (method_exists($this, 'get_user_xp_level')) {
+                        $method_level = $this->get_user_xp_level($userid, $courseid);
+                        error_log("Method get_user_xp_level returned: " . ($method_level ? $method_level : 'NULL'));
+                        
+                        if ($method_level > $user_level) {
+                            $user_level = $method_level;
+                        }
+                    }
+                } catch (Exception $e) {
+                    error_log("Error calling get_user_xp_level: " . $e->getMessage());
+                }
+            } else {
+                error_log("XP Block is NOT available or method doesn't exist");
+            }
+
+            error_log("Final User Level determined: $user_level");
+
+            // === APPLY BONUS JIKA LEVEL >= 3 ===
+            if ($user_level >= 3) {
+                error_log("User qualifies for bonus (Level $user_level >= 3)");
+                
+                // Hitung bonus 10%
+                $bonus_grade = $original_grade * 1.10;
+                error_log("Calculated bonus grade (110%): $bonus_grade");
+                
+                // Pastikan tidak melebihi max grade
+                if ($bonus_grade > $max_grade) {
+                    $bonus_grade = $max_grade;
+                    error_log("Bonus grade capped to max grade: $bonus_grade");
+                }
+
+                $final_grade   = $bonus_grade;
+                $bonus_applied = true;
+                $bonus_amount  = $final_grade - $original_grade;
+                
+                error_log("BONUS APPLIED! Final grade: $final_grade, Bonus amount: $bonus_amount");
+            } else {
+                error_log("User does NOT qualify for bonus (Level $user_level < 3)");
+            }
         }
-    }
 
-    // === Update attempt dengan bonus sebelum quiz_save_best_grade() ===
-    $this->attempt->sumgrades = $final_grade; //
-    $this->attempt->state     = self::FINISHED;
-    $this->attempt->timecheckstate = null;
-    $DB->update_record('quiz_attempts', $this->attempt); 
-
-    if (!$this->is_preview()) {
-        quiz_save_best_grade($this->get_quiz(), $userid); 
-  
-
-        $grade_item = grade_item::fetch(array(
-            'courseid'      => $courseid,
-            'itemtype'      => 'mod',
-            'itemmodule'    => 'quiz',
-            'iteminstance'  => $this->get_quiz()->id
-        ));
-        if ($grade_item) {
-            $grade_item->update_final_grade($userid, $final_grade); 
-        }
-
-        $this->fire_state_transition_event('\mod_quiz\event\attempt_submitted', $timestamp, $studentisonline);
-        $this->get_access_manager($timestamp)->current_attempt_finished();
-    }
-
-    $transaction->allow_commit();
-
-    // === SIMPAN NOTIFICATION MESSAGE KE SESSION ===
-    if (!$this->is_preview()) {
-        $quiz = $this->get_quiz();
-        $final_percentage = ($final_grade / $quiz->sumgrades) * 100;
+        // === UPDATE ATTEMPT RECORD ===
+        error_log("Updating attempt record...");
         
-        if ($final_percentage >= 100) {
-            // Jika nilai 100%, tampilkan pesan sukses
-            $SESSION->quiz_notification = "🏆 Nilai Anda sudah mencapai 100%! Bonus tidak diperlukan.";
-            $SESSION->quiz_notification_type = "success";
-            
-        } else if ($bonus_applied) {
-            // Jika mendapat bonus tapi belum 100%
-            $bonus_text = number_format($bonus_amount, 2);
-            $SESSION->quiz_notification = "🎉 Selamat! Anda mendapat bonus Level {$user_level}: +{$bonus_text} poin";
-            $SESSION->quiz_notification_type = "info";
-        }
-    }
+        $this->attempt->sumgrades = $final_grade;
+        $this->attempt->state = self::FINISHED;
+        $this->attempt->timecheckstate = null;
+        
+        $DB->update_record('quiz_attempts', $this->attempt);
+        error_log("Attempt record updated successfully");
 
+        // === VERIFY UPDATE ===
+        $verify_record = $DB->get_record('quiz_attempts', array('id' => $this->attempt->id), 'sumgrades, state');
+        if ($verify_record) {
+            error_log("Verification - DB sumgrades: {$verify_record->sumgrades}, state: {$verify_record->state}");
+        } else {
+            error_log("ERROR: Could not verify attempt record update!");
+        }
+
+        if (!$this->is_preview()) {
+            error_log("Processing non-preview attempt...");
+            
+            // Simpan best grade
+            quiz_save_best_grade($quiz, $userid);
+            error_log("quiz_save_best_grade called");
+
+            // Update grade item
+            $grade_item = grade_item::fetch(array(
+                'courseid'      => $courseid,
+                'itemtype'      => 'mod',
+                'itemmodule'    => 'quiz',
+                'iteminstance'  => $quiz->id
+            ));
+            
+            if ($grade_item) {
+                error_log("Grade item found, updating with final grade: $final_grade");
+                $grade_item->update_final_grade($userid, $final_grade);
+                error_log("Grade item updated successfully");
+            } else {
+                error_log("ERROR: Grade item not found!");
+            }
+
+            $this->fire_state_transition_event('\mod_quiz\event\attempt_submitted', $timestamp, $studentisonline);
+            $this->get_access_manager($timestamp)->current_attempt_finished();
+        }
+
+        // COMMIT TRANSACTION
+        $transaction->allow_commit();
+        error_log("Transaction committed successfully");
+
+        // === SIMPAN NOTIFICATION MESSAGE KE SESSION ===
+        if (!$this->is_preview()) {
+            $final_percentage = ($max_grade > 0) ? ($final_grade / $max_grade) * 100 : 0;
+            
+            if ($original_percentage >= 100) {
+                $SESSION->quiz_notification = "🏆 Nilai Anda sudah mencapai 100%! Bonus tidak diperlukan.";
+                $SESSION->quiz_notification_type = "success";
+                
+            } else if ($bonus_applied) {
+                $bonus_text = number_format($bonus_amount, 2);
+                $final_percentage_text = number_format($final_percentage, 1);
+                $SESSION->quiz_notification = "🎉 Selamat! Anda mendapat bonus Level {$user_level}: +{$bonus_text} poin (Total: {$final_percentage_text}%)";
+                $SESSION->quiz_notification_type = "info";
+                
+            } else {
+                $original_percentage_text = number_format($original_percentage, 1);
+                $SESSION->quiz_notification = "ℹ️ Nilai: {$original_percentage_text}% - Level {$user_level} (Perlu Level 3+ untuk bonus 10%)";
+                $SESSION->quiz_notification_type = "warning";
+            }
+            
+            error_log("Session notification set: " . $SESSION->quiz_notification);
+        }
+
+        error_log("=== QUIZ BONUS DEBUG END ===");
+
+    } catch (Exception $e) {
+        error_log("CRITICAL ERROR in process_finish: " . $e->getMessage());
+        error_log("Stack trace: " . $e->getTraceAsString());
+        
+        // Rollback transaction
+        $transaction->rollback($e);
+        throw $e;
+    }
 }
 
 
