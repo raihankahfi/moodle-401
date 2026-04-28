@@ -2412,12 +2412,27 @@ class quiz_attempt {
             error_log("Final User Level determined: $user_level");
 
             // === APPLY BONUS JIKA LEVEL >= 3 ===
+            // === APPLY BONUS BERDASARKAN LEVEL ===
             if ($user_level >= 3) {
-                error_log("User qualifies for bonus (Level $user_level >= 3)");
+                error_log("User qualifies for bonus (Level $user_level)");
                 
-                // Hitung bonus 10%
-                $bonus_grade = $original_grade * 1.10;
-                error_log("Calculated bonus grade (110%): $bonus_grade");
+                // Tentukan persentase bonus berdasarkan level
+                $bonus_percentage = 0;
+                
+                if ($user_level == 3) {
+                    $bonus_percentage = 1.10; // +10%
+                    error_log("Level 3 bonus: 10%");
+                } else if ($user_level == 4) {
+                    $bonus_percentage = 1.15; // +15%
+                    error_log("Level 4 bonus: 15%");
+                } else if ($user_level >= 5) {
+                    $bonus_percentage = 1.20; // +20%
+                    error_log("Level 5+ bonus: 20%");
+                }
+                
+                // Hitung bonus grade
+                $bonus_grade = $original_grade * $bonus_percentage;
+                error_log("Calculated bonus grade ({$bonus_percentage}x): $bonus_grade");
                 
                 // Pastikan tidak melebihi max grade
                 if ($bonus_grade > $max_grade) {
@@ -2429,9 +2444,14 @@ class quiz_attempt {
                 $bonus_applied = true;
                 $bonus_amount  = $final_grade - $original_grade;
                 
-                error_log("BONUS APPLIED! Final grade: $final_grade, Bonus amount: $bonus_amount");
+                // Hitung persentase bonus yang sebenarnya diberikan
+                $actual_bonus_percent = ($bonus_amount / $original_grade) * 100;
+                
+                error_log("BONUS APPLIED! Final grade: $final_grade");
+                error_log("Bonus amount: $bonus_amount (+" . number_format($actual_bonus_percent, 1) . "%)");
             } else {
                 error_log("User does NOT qualify for bonus (Level $user_level < 3)");
+                $final_grade = $original_grade;
             }
         }
 
@@ -2485,6 +2505,7 @@ class quiz_attempt {
         error_log("Transaction committed successfully");
 
         // === SIMPAN NOTIFICATION MESSAGE KE SESSION ===
+       // === SIMPAN NOTIFICATION MESSAGE KE SESSION ===
         if (!$this->is_preview()) {
             $final_percentage = ($max_grade > 0) ? ($final_grade / $max_grade) * 100 : 0;
             
@@ -2493,20 +2514,30 @@ class quiz_attempt {
                 $SESSION->quiz_notification_type = "success";
                 
             } else if ($bonus_applied) {
-                $bonus_text = number_format($bonus_amount, 2);
+                // Tentukan teks bonus berdasarkan level
+                $bonus_text = "";
+                if ($user_level == 3) {
+                    $bonus_text = "10%";
+                } else if ($user_level == 4) {
+                    $bonus_text = "15%";
+                } else if ($user_level >= 5) {
+                    $bonus_text = "20%";
+                }
+                
+                $bonus_points = number_format($bonus_amount, 2);
                 $final_percentage_text = number_format($final_percentage, 1);
-                $SESSION->quiz_notification = "🎉 Selamat! Anda mendapat bonus Level {$user_level}: +{$bonus_text} poin (Total: {$final_percentage_text}%)";
+                
+                $SESSION->quiz_notification = "🎉 Selamat! Bonus Level {$user_level} (+{$bonus_text}): +{$bonus_points} poin → Total: {$final_percentage_text}%";
                 $SESSION->quiz_notification_type = "info";
                 
             } else {
                 $original_percentage_text = number_format($original_percentage, 1);
-                $SESSION->quiz_notification = "ℹ️ Nilai: {$original_percentage_text}% - Level {$user_level} (Perlu Level 3+ untuk bonus 10%)";
+                $SESSION->quiz_notification = "ℹ️ Nilai: {$original_percentage_text}% - Level {$user_level}. Bonus: Level 3 (+10%), Level 4 (+15%), Level 5+ (+20%)";
                 $SESSION->quiz_notification_type = "warning";
             }
             
             error_log("Session notification set: " . $SESSION->quiz_notification);
         }
-
         error_log("=== QUIZ BONUS DEBUG END ===");
 
     } catch (Exception $e) {
@@ -2518,6 +2549,7 @@ class quiz_attempt {
         throw $e;
     }
 }
+
 
 
 /**
