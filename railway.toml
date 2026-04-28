@@ -1,2 +1,2 @@
-[deploy.build.env]
-RAILPACK_PHP_VERSION = "8.2"
+[build]
+builder = "RAILPACK"

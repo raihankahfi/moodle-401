@@ -1,5 +1,1 @@
-[build]
-builder = "nixpacks"
-
-[build.env]
-RAILPACK_PHP_VERSION = "8.2"
+8.2
